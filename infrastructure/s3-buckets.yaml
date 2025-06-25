@@ -1,4 +1,3 @@
-# infrastructure/s3-buckets.yaml
 AWSTemplateFormatVersion: '2010-09-09'
 Description: 'S3 buckets for lakehouse pipeline'
 
