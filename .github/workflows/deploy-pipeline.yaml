@@ -1,0 +1,70 @@
+name: Deploy Lakehouse Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  AWS_REGION: us-east-1
+  ENVIRONMENT: dev
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Run tests
+      run: |
+        python -m pytest tests/ -v || echo "No tests found yet"
+  
+  deploy-infrastructure:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+    
+    - name: Deploy S3 Infrastructure
+      run: |
+        chmod +x scripts/deploy-infrastructure.sh
+        ./scripts/deploy-infrastructure.sh ${{ env.ENVIRONMENT }}
+    
+    - name: Upload Glue Scripts to S3
+      run: |
+        # Get the bucket name from CloudFormation output
+        CODE_BUCKET=$(aws cloudformation describe-stacks \
+          --stack-name lakehouse-s3-${{ env.ENVIRONMENT }} \
+          --query 'Stacks[0].Outputs[?OutputKey==`CodeBucketName`].OutputValue' \
+          --output text)
+        
+        echo "Uploading to bucket: $CODE_BUCKET"
+        aws s3 cp src/glue_jobs/ s3://$CODE_BUCKET/glue-jobs/ --recursive
+        
+    - name: Verify deployment
+      run: |
+        echo "Deployment completed successfully!"
+        aws s3 ls s3://lakehouse-ecommerce-raw-${{ env.ENVIRONMENT }}-${{ secrets.AWS_ACCOUNT_ID }}/

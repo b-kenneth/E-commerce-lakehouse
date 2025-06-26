@@ -1,3 +1,4 @@
+# infrastructure/s3-buckets.yaml (add CodeBucket output)
 AWSTemplateFormatVersion: '2010-09-09'
 Description: 'S3 buckets for lakehouse pipeline'
 
@@ -42,6 +43,11 @@ Resources:
       BucketName: !Sub "${ProjectName}-code-${Environment}-${AWS::AccountId}"
       VersioningConfiguration:
         Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
 
 Outputs:
   RawDataBucketName:
@@ -55,3 +61,9 @@ Outputs:
     Value: !Ref ProcessedDataBucket
     Export:
       Name: !Sub "${AWS::StackName}-ProcessedDataBucket"
+      
+  CodeBucketName:
+    Description: Name of the code bucket
+    Value: !Ref CodeBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-CodeBucket"
