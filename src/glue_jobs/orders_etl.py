@@ -197,58 +197,163 @@ class OrdersETL:
             print(f"⚠️ Archive operation failed: {str(e)}")
     
     def process_orders(self):
-        """Main processing logic for orders"""
+        """Enhanced processing logic that handles both incoming and processing folders"""
         
-        print("🚀 Starting Orders ETL Process")
+        print("🚀 Starting Enhanced Orders ETL Process")
         print(f"📍 Environment: {self.environment}")
         print(f"📍 Raw Bucket: {self.raw_bucket}")
         print(f"📍 Processed Bucket: {self.processed_bucket}")
         
         try:
-            # Read raw data from incoming folder
-            input_path = f"s3://{self.raw_bucket}/incoming/orders/"
-            print(f"📖 Reading data from: {input_path}")
+            # Check both incoming and processing folders for multi-format support
+            input_paths = [
+                f"s3://{self.raw_bucket}/incoming/orders/",
+                f"s3://{self.raw_bucket}/processing/orders/"
+            ]
             
-            raw_df = spark.read.option("header", "true") \
-                              .option("inferSchema", "true") \
-                              .csv(input_path)
+            all_dataframes = []
+            processed_file_count = 0
             
-            initial_count = raw_df.count()
-            print(f"📊 Initial record count: {initial_count}")
+            for input_path in input_paths:
+                try:
+                    print(f"📖 Checking path: {input_path}")
+                    
+                    # Read CSV files from current path
+                    df = spark.read.option("header", "true") \
+                                .option("inferSchema", "true") \
+                                .option("multiline", "true") \
+                                .option("escape", '"') \
+                                .csv(input_path)
+                    
+                    current_count = df.count()
+                    if current_count > 0:
+                        all_dataframes.append(df)
+                        processed_file_count += 1
+                        print(f"✅ Found {current_count} records in {input_path}")
+                    else:
+                        print(f"⚠️ No records found in {input_path}")
+                        
+                except Exception as e:
+                    print(f"⚠️ No accessible data in {input_path}: {str(e)}")
+                    continue
             
-            if initial_count == 0:
-                print("⚠️ No data found to process")
+            if not all_dataframes:
+                print("⚠️ No data found to process in any location")
                 return 0
             
-            # Step 1: Validate data
+            # Union all dataframes from different sources
+            print(f"🔗 Combining data from {len(all_dataframes)} sources")
+            raw_df = all_dataframes[0]
+            for df in all_dataframes[1:]:
+                # Ensure schema compatibility before union
+                if set(raw_df.columns) == set(df.columns):
+                    raw_df = raw_df.union(df.select(raw_df.columns))
+                else:
+                    print(f"⚠️ Schema mismatch detected, skipping incompatible data")
+            
+            initial_count = raw_df.count()
+            print(f"📊 Total records to process: {initial_count}")
+            
+            if initial_count == 0:
+                print("⚠️ No valid data found after combining sources")
+                return 0
+            
+            # Step 1: Enhanced data validation with detailed logging
+            print("🔍 Step 1: Applying comprehensive validation rules...")
             valid_df, invalid_df = self.validate_orders_data(raw_df)
             
-            # Step 2: Log rejected records
+            # Step 2: Log rejected records with detailed audit trail
             if invalid_df.count() > 0:
+                print(f"📝 Step 2: Logging {invalid_df.count()} rejected records")
                 self.log_rejected_records(invalid_df, "validation_failed")
+            else:
+                print("✅ Step 2: All records passed validation")
             
-            # Step 3: Deduplicate
+            # Step 3: Advanced deduplication with business logic
+            print("🔄 Step 3: Performing intelligent deduplication...")
             deduped_df = self.deduplicate_orders(valid_df)
             
-            # Step 4: Transform
+            if deduped_df.count() == 0:
+                print("❌ No records remaining after deduplication")
+                return 0
+            
+            # Step 4: Apply comprehensive transformations
+            print("🔧 Step 4: Applying business transformations...")
             transformed_df = self.transform_orders(deduped_df)
             
-            # Step 5: Write to Delta Lake
+            # Step 5: Write to Delta Lake with ACID compliance
+            print("💾 Step 5: Writing to Delta Lake with ACID guarantees...")
             delta_path = f"s3://{self.processed_bucket}/lakehouse-dwh/orders/"
             self.write_to_delta_lake(transformed_df, delta_path)
             
-            # Step 6: Archive processed files
-            self.archive_processed_files(input_path)
+            # Step 6: Archive processed files (only from incoming folder)
+            print("📦 Step 6: Archiving successfully processed files...")
+            self.archive_processed_files(f"s3://{self.raw_bucket}/incoming/orders/")
             
+            # Step 7: Data quality metrics and logging
             final_count = transformed_df.count()
+            success_rate = (final_count / initial_count) * 100 if initial_count > 0 else 0
+            
+            print("📊 === Processing Summary ===")
+            print(f"📥 Initial records: {initial_count}")
+            print(f"❌ Invalid records: {invalid_df.count()}")
+            print(f"🔄 Duplicates removed: {valid_df.count() - deduped_df.count()}")
+            print(f"✅ Final processed records: {final_count}")
+            print(f"📈 Success rate: {success_rate:.2f}%")
+            print(f"📁 Files processed: {processed_file_count}")
+            
+            # Step 8: Update processing metrics for monitoring
+            self.log_processing_metrics({
+                'dataset': 'orders',
+                'initial_count': initial_count,
+                'final_count': final_count,
+                'invalid_count': invalid_df.count(),
+                'duplicate_count': valid_df.count() - deduped_df.count(),
+                'success_rate': success_rate,
+                'files_processed': processed_file_count,
+                'processing_timestamp': datetime.now().isoformat()
+            })
+            
             print(f"🎉 Orders ETL completed successfully!")
-            print(f"📊 Final processed records: {final_count}")
+            print(f"🏁 Delta Lake table updated at: {delta_path}")
             
             return final_count
             
         except Exception as e:
-            print(f"💥 Error in Orders ETL: {str(e)}")
+            print(f"💥 Critical error in Orders ETL: {str(e)}")
+            print(f"🔍 Error details: {type(e).__name__}")
+            
+            # Log error for monitoring and alerting
+            self.log_processing_error({
+                'dataset': 'orders',
+                'error_type': type(e).__name__,
+                'error_message': str(e),
+                'processing_timestamp': datetime.now().isoformat()
+            })
+            
             raise e
+
+    def log_processing_metrics(self, metrics):
+        """Log processing metrics to CloudWatch for monitoring"""
+        try:
+            import json
+            metrics_path = f"s3://{self.processed_bucket}/metrics/orders/"
+            metrics_df = spark.createDataFrame([metrics])
+            metrics_df.write.mode("append").json(metrics_path)
+            print(f"📊 Processing metrics logged to: {metrics_path}")
+        except Exception as e:
+            print(f"⚠️ Failed to log metrics: {str(e)}")
+
+    def log_processing_error(self, error_info):
+        """Log processing errors for alerting and debugging"""
+        try:
+            import json
+            error_path = f"s3://{self.processed_bucket}/errors/orders/"
+            error_df = spark.createDataFrame([error_info])
+            error_df.write.mode("append").json(error_path)
+            print(f"🚨 Error logged to: {error_path}")
+        except Exception as e:
+            print(f"⚠️ Failed to log error: {str(e)}")
 
 # Main execution
 if __name__ == "__main__":
