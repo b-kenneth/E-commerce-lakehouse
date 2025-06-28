@@ -1,101 +1,170 @@
 {
-  "Comment": "Lakehouse ETL Orchestration",
-  "StartAt": "CheckDataAvailability",
+  "Comment": "Production Lakehouse ETL with Multi-Format Support and Validation",
+  "StartAt": "FileFormatDetectionAndValidation",
   "States": {
-    "CheckDataAvailability": {
+    "FileFormatDetectionAndValidation": {
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke",
       "Parameters": {
-        "FunctionName": "lakehouse-data-checker",
-        "Payload": {
-          "bucket": "lakehouse-raw-dev",
-          "prefixes": ["incoming/orders/", "incoming/products/", "incoming/order_items/"]
-        }
+        "FunctionName": "lakehouse-file-processor",
+        "Payload.$": "$"
       },
-      "Next": "ParallelETLProcessing",
+      "Next": "CheckValidationResult",
       "Catch": [
         {
           "ErrorEquals": ["States.ALL"],
-          "Next": "HandleFailure"
+          "Next": "ValidationFailureNotification",
+          "ResultPath": "$.error"
         }
       ]
     },
-    "ParallelETLProcessing": {
+    "CheckValidationResult": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.Payload.body",
+          "StringMatches": "*validation_failed*",
+          "Next": "ValidationFailureNotification"
+        },
+        {
+          "Variable": "$.Payload.body",
+          "StringMatches": "*ready_for_processing*",
+          "Next": "ParseProcessingResult"
+        }
+      ],
+      "Default": "ValidationFailureNotification"
+    },
+    "ParseProcessingResult": {
+      "Type": "Pass",
+      "Parameters": {
+        "processing_info.$": "States.StringToJson($.Payload.body)"
+      },
+      "Next": "DetermineETLStrategy"
+    },
+    "DetermineETLStrategy": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.processing_info.glue_jobs[0]",
+          "StringEquals": "lakehouse-orders-etl",
+          "Next": "ProcessOrders"
+        },
+        {
+          "Variable": "$.processing_info.glue_jobs[0]",
+          "StringEquals": "lakehouse-products-etl",
+          "Next": "ProcessProducts"
+        },
+        {
+          "Variable": "$.processing_info.glue_jobs[0]",
+          "StringEquals": "lakehouse-order-items-etl",
+          "Next": "ProcessOrderItems"
+        }
+      ],
+      "Default": "ProcessAllDatasets"
+    },
+    "ProcessOrders": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "lakehouse-orders-etl",
+        "Arguments": {
+          "--processed_files.$": "$.processing_info.processed_files"
+        }
+      },
+      "Next": "UpdateCatalogAndValidate",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "ETLFailureNotification"
+        }
+      ]
+    },
+    "ProcessProducts": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "lakehouse-products-etl"
+      },
+      "Next": "UpdateCatalogAndValidate",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ]
+    },
+    "ProcessOrderItems": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "lakehouse-order-items-etl"
+      },
+      "Next": "UpdateCatalogAndValidate",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ]
+    },
+    "ProcessAllDatasets": {
       "Type": "Parallel",
       "Branches": [
         {
-          "StartAt": "ProcessProducts",
+          "StartAt": "ProcessOrdersParallel",
           "States": {
-            "ProcessProducts": {
-              "Type": "Task",
-              "Resource": "arn:aws:states:::glue:startJobRun.sync",
-              "Parameters": {
-                "JobName": "lakehouse-products-etl"
-              },
-              "End": true,
-              "Retry": [
-                {
-                  "ErrorEquals": ["States.ALL"],
-                  "IntervalSeconds": 30,
-                  "MaxAttempts": 2,
-                  "BackoffRate": 2.0
-                }
-              ]
-            }
-          }
-        },
-        {
-          "StartAt": "ProcessOrders",
-          "States": {
-            "ProcessOrders": {
+            "ProcessOrdersParallel": {
               "Type": "Task",
               "Resource": "arn:aws:states:::glue:startJobRun.sync",
               "Parameters": {
                 "JobName": "lakehouse-orders-etl"
               },
-              "End": true,
-              "Retry": [
-                {
-                  "ErrorEquals": ["States.ALL"],
-                  "IntervalSeconds": 30,
-                  "MaxAttempts": 2,
-                  "BackoffRate": 2.0
-                }
-              ]
+              "End": true
             }
           }
         },
         {
-          "StartAt": "ProcessOrderItems",
+          "StartAt": "ProcessProductsParallel",
           "States": {
-            "ProcessOrderItems": {
+            "ProcessProductsParallel": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::glue:startJobRun.sync",
+              "Parameters": {
+                "JobName": "lakehouse-products-etl"
+              },
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "ProcessOrderItemsParallel",
+          "States": {
+            "ProcessOrderItemsParallel": {
               "Type": "Task",
               "Resource": "arn:aws:states:::glue:startJobRun.sync",
               "Parameters": {
                 "JobName": "lakehouse-order-items-etl"
               },
-              "End": true,
-              "Retry": [
-                {
-                  "ErrorEquals": ["States.ALL"],
-                  "IntervalSeconds": 30,
-                  "MaxAttempts": 2,
-                  "BackoffRate": 2.0
-                }
-              ]
+              "End": true
             }
           }
         }
       ],
-      "Next": "UpdateDataCatalog",
-      "Catch": [
-        {
-          "ErrorEquals": ["States.ALL"],
-          "Next": "HandleFailure"
-        }
-      ]
+      "Next": "UpdateCatalogAndValidate"
     },
-    "UpdateDataCatalog": {
+    "UpdateCatalogAndValidate": {
       "Type": "Task",
       "Resource": "arn:aws:states:::glue:startCrawler",
       "Parameters": {
@@ -107,28 +176,46 @@
       "Type": "Task",
       "Resource": "arn:aws:states:::athena:startQueryExecution.sync",
       "Parameters": {
-        "QueryString": "SELECT COUNT(*) as total_orders FROM lakehouse_ecommerce_db.orders",
+        "QueryString": "SELECT 'orders' as table_name, COUNT(*) as record_count FROM lakehouse_ecommerce_db.orders UNION ALL SELECT 'products' as table_name, COUNT(*) as record_count FROM lakehouse_ecommerce_db.products UNION ALL SELECT 'order_items' as table_name, COUNT(*) as record_count FROM lakehouse_ecommerce_db.order_items",
         "ResultConfiguration": {
           "OutputLocation": "s3://lakehouse-processed-dev/athena-results/"
         }
       },
-      "Next": "NotifySuccess"
+      "Next": "ArchiveProcessedFiles"
     },
-    "NotifySuccess": {
+    "ArchiveProcessedFiles": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "lakehouse-file-archiver",
+        "Payload.$": "$"
+      },
+      "Next": "SuccessNotification"
+    },
+    "SuccessNotification": {
       "Type": "Task",
       "Resource": "arn:aws:states:::sns:publish",
       "Parameters": {
         "TopicArn": "arn:aws:sns:us-east-1:ACCOUNT:lakehouse-notifications",
-        "Message": "Lakehouse ETL pipeline completed successfully"
+        "Message": "✅ Lakehouse ETL pipeline completed successfully with multi-format support"
       },
       "End": true
     },
-    "HandleFailure": {
+    "ValidationFailureNotification": {
       "Type": "Task",
       "Resource": "arn:aws:states:::sns:publish",
       "Parameters": {
         "TopicArn": "arn:aws:sns:us-east-1:ACCOUNT:lakehouse-notifications",
-        "Message": "Lakehouse ETL pipeline failed"
+        "Message.$": "States.Format('❌ File validation failed: {}', $.error.Cause)"
+      },
+      "End": true
+    },
+    "ETLFailureNotification": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "arn:aws:sns:us-east-1:ACCOUNT:lakehouse-notifications",
+        "Message": "💥 Lakehouse ETL pipeline failed during processing"
       },
       "End": true
     }
