@@ -1,8 +1,9 @@
+# src/lambda/file_processor.py
 import json
 import boto3
-import pandas as pd
-from io import BytesIO
-import awswrangler as wr
+import csv
+from io import StringIO
+import urllib.parse
 
 def lambda_handler(event, context):
     """
@@ -12,9 +13,15 @@ def lambda_handler(event, context):
     
     s3_client = boto3.client('s3')
     
-    # Extract S3 event information
-    bucket = event['Records'][0]['s3']['bucket']['name']
-    key = event['Records'][0]['s3']['object']['key']
+    # Handle both S3 event and Step Functions input
+    if 'Records' in event:
+        # S3 Event structure
+        bucket = event['Records'][0]['s3']['bucket']['name']
+        key = urllib.parse.unquote_plus(event['Records'][0]['s3']['object']['key'], encoding='utf-8')
+    else:
+        # Step Functions structure
+        bucket = event['bucket']
+        key = event['key']
     
     print(f"🔍 Processing file: s3://{bucket}/{key}")
     
@@ -38,11 +45,14 @@ def lambda_handler(event, context):
         
         # Step 3: Process based on format
         if file_format == 'excel':
-            processed_files = process_excel_file(bucket, key)
+            # For Excel files, just copy to processing folder
+            # Glue will handle Excel processing with proper libraries
+            processed_files = copy_to_processing(bucket, key)
+            print("⚠️ Excel file copied to processing - Glue will handle conversion")
         else:
             processed_files = process_csv_file(bucket, key)
         
-        # Step 4: Trigger appropriate Glue jobs
+        # Step 4: Determine appropriate Glue jobs
         glue_jobs = determine_glue_jobs(key)
         
         return {
@@ -57,6 +67,8 @@ def lambda_handler(event, context):
         
     except Exception as e:
         print(f"💥 Error processing file: {str(e)}")
+        import traceback
+        print(f"🔍 Full traceback: {traceback.format_exc()}")
         return {
             'statusCode': 500,
             'body': json.dumps({
@@ -76,7 +88,7 @@ def detect_file_format(file_key):
         raise ValueError(f"Unsupported file format: {file_key}")
 
 def validate_file_structure(bucket, key, file_format):
-    """Validate file structure and headers before processing"""
+    """Validate file structure using native Python"""
     
     s3_client = boto3.client('s3')
     validation_result = {'is_valid': True, 'errors': []}
@@ -101,28 +113,20 @@ def validate_file_structure(bucket, key, file_format):
             validation_result['is_valid'] = False
             return validation_result
         
-        # Read file headers based on format
-        if file_format == 'excel':
-            headers = get_excel_headers(bucket, key)
-        else:
-            headers = get_csv_headers(bucket, key)
-        
-        # Validate headers against expected schema
-        expected_headers = expected_schemas[dataset_type]
-        missing_headers = set(expected_headers) - set(headers)
-        
-        if missing_headers:
-            validation_result['errors'].append(f"Missing required headers: {list(missing_headers)}")
-            validation_result['is_valid'] = False
-        
-        # Additional validations
-        if len(headers) == 0:
-            validation_result['errors'].append("No headers found in file")
-            validation_result['is_valid'] = False
+        # For CSV files, validate headers
+        if file_format == 'csv':
+            headers = get_csv_headers_native(bucket, key)
+            expected_headers = expected_schemas[dataset_type]
+            missing_headers = set(expected_headers) - set(headers)
             
+            if missing_headers:
+                validation_result['errors'].append(f"Missing required headers: {list(missing_headers)}")
+                validation_result['is_valid'] = False
+        else:
+            # For Excel files, defer validation to Glue
+            print("⚠️ Excel validation deferred to Glue processing")
+        
         print(f"✅ Header validation completed for {dataset_type}")
-        print(f"📋 Expected: {expected_headers}")
-        print(f"📋 Found: {headers}")
         
     except Exception as e:
         validation_result['errors'].append(f"Validation error: {str(e)}")
@@ -130,77 +134,46 @@ def validate_file_structure(bucket, key, file_format):
     
     return validation_result
 
-def get_excel_headers(bucket, key):
-    """Extract headers from Excel file (first sheet)"""
+def get_csv_headers_native(bucket, key):
+    """Extract headers from CSV file using native Python"""
     try:
-        # Read Excel file using awswrangler
-        df = wr.s3.read_excel(f's3://{bucket}/{key}', engine='openpyxl', nrows=1)
-        return list(df.columns)
-    except Exception as e:
-        print(f"Error reading Excel headers: {str(e)}")
-        return []
-
-def get_csv_headers(bucket, key):
-    """Extract headers from CSV file"""
-    try:
-        # Read only first row to get headers
-        df = wr.s3.read_csv(f's3://{bucket}/{key}', nrows=1)
-        return list(df.columns)
+        s3_client = boto3.client('s3')
+        
+        # Read first few bytes to get headers
+        response = s3_client.get_object(Bucket=bucket, Key=key, Range='bytes=0-1024')
+        content = response['Body'].read().decode('utf-8')
+        
+        # Parse CSV headers
+        csv_reader = csv.reader(StringIO(content))
+        headers = next(csv_reader)
+        
+        return [header.strip() for header in headers]
+        
     except Exception as e:
         print(f"Error reading CSV headers: {str(e)}")
         return []
 
-def process_excel_file(bucket, key):
-    """Process Excel file with multiple sheets"""
+def copy_to_processing(bucket, key):
+    """Copy file to processing folder"""
+    s3_client = boto3.client('s3')
     
-    print(f"📊 Processing Excel file: {key}")
-    processed_files = []
+    processing_key = key.replace('incoming/', 'processing/')
     
-    try:
-        # Read all sheets from Excel file
-        excel_file = wr.s3.read_excel(f's3://{bucket}/{key}', engine='openpyxl', sheet_name=None)
-        
-        for sheet_name, df in excel_file.items():
-            if df.empty:
-                continue
-                
-            # Generate CSV file name based on sheet
-            csv_key = key.replace('.xlsx', f'_{sheet_name}.csv').replace('.xls', f'_{sheet_name}.csv')
-            csv_key = csv_key.replace('incoming/', 'processing/')
-            
-            # Write CSV to processing folder
-            wr.s3.to_csv(df, f's3://{bucket}/{csv_key}', index=False)
-            
-            processed_files.append(csv_key)
-            print(f"✅ Converted sheet '{sheet_name}' to {csv_key}")
-        
-        return processed_files
-        
-    except Exception as e:
-        print(f"Error processing Excel file: {str(e)}")
-        raise e
+    copy_source = {'Bucket': bucket, 'Key': key}
+    s3_client.copy_object(
+        CopySource=copy_source,
+        Bucket=bucket,
+        Key=processing_key
+    )
+    
+    print(f"✅ Copied {key} to {processing_key}")
+    return [processing_key]
 
 def process_csv_file(bucket, key):
-    """Process CSV file (move to processing folder)"""
+    """Process CSV file (copy to processing folder)"""
     
     print(f"📄 Processing CSV file: {key}")
-    
-    try:
-        # Move CSV to processing folder
-        processing_key = key.replace('incoming/', 'processing/')
-        
-        s3_client = boto3.client('s3')
-        s3_client.copy_object(
-            Bucket=bucket,
-            CopySource={'Bucket': bucket, 'Key': key},
-            Key=processing_key
-        )
-        
-        return [processing_key]
-        
-    except Exception as e:
-        print(f"Error processing CSV file: {str(e)}")
-        raise e
+    return copy_to_processing(bucket, key)
 
 def determine_glue_jobs(file_key):
     """Determine which Glue jobs to trigger based on file path"""

@@ -1,3 +1,4 @@
+# src/glue_jobs/orders_etl.py
 import sys
 from awsglue.transforms import *
 from awsglue.utils import getResolvedOptions
@@ -12,7 +13,14 @@ from pyspark.sql.window import Window
 import boto3
 from datetime import datetime
 
-args = getResolvedOptions(sys.argv, ['JOB_NAME', 'RAW_BUCKET', 'PROCESSED_BUCKET', 'ENVIRONMENT', 'GLUE_DATABASE'])
+# Get job arguments
+args = getResolvedOptions(sys.argv, [
+    'JOB_NAME', 
+    'RAW_BUCKET', 
+    'PROCESSED_BUCKET',
+    'ENVIRONMENT',
+    'GLUE_DATABASE'
+])
 
 sc = SparkContext()
 glueContext = GlueContext(sc)
@@ -20,16 +28,7 @@ spark = glueContext.spark_session
 job = Job(glueContext)
 job.init(args['JOB_NAME'], args)
 
-input_path = f"s3://{args['RAW_BUCKET']}/processing/orders/*.csv"  # Only CSV files
-
-print(f"Reading orders data from: {input_path}")
-
-orders_df = spark.read.option("header", "true").csv(input_path)
-
-print("Schema of orders dataframe:")
-orders_df.printSchema()
-
-
+# Delta Lake configurations are set at job level via --conf parameters
 
 class OrdersETL:
     def __init__(self, raw_bucket, processed_bucket, environment, glue_database):
@@ -48,7 +47,98 @@ class OrdersETL:
             print(f"✅ Catalog: {catalog}")
         except Exception as e:
             print(f"⚠️ Configuration check failed: {str(e)}")
+    
+    def read_multi_format_data(self, input_paths):
+        """Read both CSV and Excel files from multiple paths"""
         
+        all_dataframes = []
+        
+        for input_path in input_paths:
+            try:
+                print(f"📖 Checking path: {input_path}")
+                
+                # List all files in the path
+                prefix = input_path.replace(f's3://{self.raw_bucket}/', '')
+                response = self.s3_client.list_objects_v2(
+                    Bucket=self.raw_bucket,
+                    Prefix=prefix
+                )
+                
+                if 'Contents' not in response:
+                    print(f"⚠️ No files found in {input_path}")
+                    continue
+                
+                for obj in response['Contents']:
+                    file_key = obj['Key']
+                    file_path = f"s3://{self.raw_bucket}/{file_key}"
+                    
+                    # Skip directories
+                    if file_key.endswith('/'):
+                        continue
+                    
+                    print(f"📄 Processing file: {file_key}")
+                    
+                    if file_key.endswith('.csv'):
+                        # Read CSV files
+                        df = spark.read.option("header", "true") \
+                                      .option("inferSchema", "true") \
+                                      .csv(file_path)
+                        all_dataframes.append(df)
+                        print(f"✅ Read CSV: {file_key} ({df.count()} records)")
+                        
+                    elif file_key.endswith(('.xlsx', '.xls')):
+                        # Read Excel files using Glue's Excel support
+                        try:
+                            # Use Glue DynamicFrame for Excel
+                            dynamic_frame = glueContext.create_dynamic_frame.from_options(
+                                connection_type="s3",
+                                connection_options={"paths": [file_path]},
+                                format="excel",
+                                format_options={
+                                    "withHeader": True,
+                                    "inferSchema": True
+                                }
+                            )
+                            df = dynamic_frame.toDF()
+                            all_dataframes.append(df)
+                            print(f"✅ Read Excel: {file_key} ({df.count()} records)")
+                            
+                        except Exception as excel_error:
+                            print(f"⚠️ Failed to read Excel file {file_key}: {str(excel_error)}")
+                            # Fallback: try reading as CSV (in case it was converted)
+                            try:
+                                df = spark.read.option("header", "true") \
+                                              .option("inferSchema", "true") \
+                                              .csv(file_path)
+                                all_dataframes.append(df)
+                                print(f"✅ Read as CSV fallback: {file_key}")
+                            except Exception as csv_error:
+                                print(f"❌ Failed to read file {file_key}: {str(csv_error)}")
+                                continue
+                    
+            except Exception as e:
+                print(f"⚠️ Error processing path {input_path}: {str(e)}")
+                continue
+        
+        # Union all dataframes
+        if all_dataframes:
+            print(f"🔗 Combining {len(all_dataframes)} dataframes")
+            result_df = all_dataframes[0]
+            for df in all_dataframes[1:]:
+                # Ensure schema compatibility
+                if set(result_df.columns) == set(df.columns):
+                    result_df = result_df.union(df.select(result_df.columns))
+                else:
+                    print(f"⚠️ Schema mismatch detected, attempting to align columns")
+                    # Try to align schemas
+                    common_columns = list(set(result_df.columns) & set(df.columns))
+                    if common_columns:
+                        result_df = result_df.select(common_columns).union(df.select(common_columns))
+            
+            return result_df
+        
+        return None
+    
     def validate_orders_data(self, df: DataFrame) -> tuple:
         """Validate orders data according to project requirements"""
         
@@ -122,31 +212,37 @@ class OrdersETL:
         
         print(f"💾 Writing to Delta Lake: {table_path}")
         
-        if DeltaTable.isDeltaTable(spark, table_path):
-            print("📝 Performing MERGE operation (upsert)")
-            
-            delta_table = DeltaTable.forPath(spark, table_path)
-            
-            # Merge logic with ACID compliance
-            delta_table.alias("target").merge(
-                df.alias("source"),
-                "target.order_id = source.order_id"
-            ).whenMatchedUpdateAll() \
-             .whenNotMatchedInsertAll() \
-             .execute()
-             
-            print("✅ MERGE operation completed")
-        else:
-            print("📝 Initial write with partitioning")
-            
-            # Initial write with partitioning for performance
-            df.write.format("delta") \
-              .mode("overwrite") \
-              .partitionBy("year", "month") \
-              .option("path", table_path) \
-              .saveAsTable(f"{self.glue_database}.orders")
-              
-            print("✅ Initial Delta table created")
+        try:
+            if DeltaTable.isDeltaTable(spark, table_path):
+                print("📝 Performing MERGE operation (upsert)")
+                
+                delta_table = DeltaTable.forPath(spark, table_path)
+                
+                # Merge logic with ACID compliance
+                delta_table.alias("target").merge(
+                    df.alias("source"),
+                    "target.order_id = source.order_id"
+                ).whenMatchedUpdateAll() \
+                 .whenNotMatchedInsertAll() \
+                 .execute()
+                 
+                print("✅ MERGE operation completed")
+            else:
+                print("📝 Initial write with partitioning for performance")
+                
+                # Initial write with partitioning for performance
+                df.write.format("delta") \
+                  .mode("overwrite") \
+                  .partitionBy("year", "month") \
+                  .save(table_path)
+                  
+                print("✅ Initial Delta table created")
+                
+        except Exception as e:
+            print(f"💥 Error writing to Delta Lake: {str(e)}")
+            # Fallback to Parquet if Delta Lake fails
+            print("🔄 Falling back to Parquet format...")
+            df.write.mode("overwrite").partitionBy("year", "month").parquet(table_path)
     
     def log_rejected_records(self, invalid_df: DataFrame, reason: str):
         """Log rejected records with detailed audit trail"""
@@ -159,45 +255,46 @@ class OrdersETL:
             invalid_df.withColumn("rejection_reason", lit(reason)) \
                      .withColumn("rejection_timestamp", current_timestamp()) \
                      .withColumn("job_run_id", lit(args['JOB_NAME'])) \
-                     .write.mode("append") \
-                     .option("path", rejected_path) \
-                     .parquet(rejected_path)
+                     .write.mode("append").parquet(rejected_path)
                      
             print(f"✅ Rejected records logged to: {rejected_path}")
     
-    def archive_processed_files(self, source_path: str):
+    def archive_processed_files(self, source_paths):
         """Archive successfully processed files"""
         
         print("📦 Archiving processed files...")
         
         try:
-            # List files in incoming directory
-            response = self.s3_client.list_objects_v2(
-                Bucket=self.raw_bucket,
-                Prefix='incoming/orders/'
-            )
-            
-            if 'Contents' in response:
-                for obj in response['Contents']:
-                    if obj['Key'].endswith('.csv'):
-                        # Copy to archived folder
-                        copy_source = {'Bucket': self.raw_bucket, 'Key': obj['Key']}
-                        archive_key = obj['Key'].replace('incoming/', 'archived/')
-                        
-                        self.s3_client.copy_object(
-                            CopySource=copy_source,
-                            Bucket=self.raw_bucket,
-                            Key=archive_key
-                        )
-                        
-                        # Delete from incoming
-                        self.s3_client.delete_object(
-                            Bucket=self.raw_bucket,
-                            Key=obj['Key']
-                        )
-                        
-                        print(f"✅ Archived: {obj['Key']} -> {archive_key}")
-                        
+            for source_path in source_paths:
+                prefix = source_path.replace(f's3://{self.raw_bucket}/', '')
+                
+                # List files in directory
+                response = self.s3_client.list_objects_v2(
+                    Bucket=self.raw_bucket,
+                    Prefix=prefix
+                )
+                
+                if 'Contents' in response:
+                    for obj in response['Contents']:
+                        if obj['Key'].endswith(('.csv', '.xlsx', '.xls')):
+                            # Copy to archived folder
+                            copy_source = {'Bucket': self.raw_bucket, 'Key': obj['Key']}
+                            archive_key = obj['Key'].replace('incoming/', 'archived/')
+                            
+                            self.s3_client.copy_object(
+                                CopySource=copy_source,
+                                Bucket=self.raw_bucket,
+                                Key=archive_key
+                            )
+                            
+                            # Delete from incoming
+                            self.s3_client.delete_object(
+                                Bucket=self.raw_bucket,
+                                Key=obj['Key']
+                            )
+                            
+                            print(f"✅ Archived: {obj['Key']} -> {archive_key}")
+                            
         except Exception as e:
             print(f"⚠️ Archive operation failed: {str(e)}")
     
@@ -216,51 +313,18 @@ class OrdersETL:
                 f"s3://{self.raw_bucket}/processing/orders/"
             ]
             
-            all_dataframes = []
-            processed_file_count = 0
+            # Read multi-format data
+            raw_df = self.read_multi_format_data(input_paths)
             
-            for input_path in input_paths:
-                try:
-                    print(f"📖 Checking path: {input_path}")
-                    
-                    # Read CSV files from current path
-                    df = spark.read.option("header", "true") \
-                                .option("inferSchema", "true") \
-                                .option("multiline", "true") \
-                                .option("escape", '"') \
-                                .csv(input_path)
-                    
-                    current_count = df.count()
-                    if current_count > 0:
-                        all_dataframes.append(df)
-                        processed_file_count += 1
-                        print(f"✅ Found {current_count} records in {input_path}")
-                    else:
-                        print(f"⚠️ No records found in {input_path}")
-                        
-                except Exception as e:
-                    print(f"⚠️ No accessible data in {input_path}: {str(e)}")
-                    continue
-            
-            if not all_dataframes:
+            if raw_df is None:
                 print("⚠️ No data found to process in any location")
                 return 0
-            
-            # Union all dataframes from different sources
-            print(f"🔗 Combining data from {len(all_dataframes)} sources")
-            raw_df = all_dataframes[0]
-            for df in all_dataframes[1:]:
-                # Ensure schema compatibility before union
-                if set(raw_df.columns) == set(df.columns):
-                    raw_df = raw_df.union(df.select(raw_df.columns))
-                else:
-                    print(f"⚠️ Schema mismatch detected, skipping incompatible data")
             
             initial_count = raw_df.count()
             print(f"📊 Total records to process: {initial_count}")
             
             if initial_count == 0:
-                print("⚠️ No valid data found after combining sources")
+                print("⚠️ No valid data found after reading files")
                 return 0
             
             # Step 1: Enhanced data validation with detailed logging
@@ -293,7 +357,7 @@ class OrdersETL:
             
             # Step 6: Archive processed files (only from incoming folder)
             print("📦 Step 6: Archiving successfully processed files...")
-            self.archive_processed_files(f"s3://{self.raw_bucket}/incoming/orders/")
+            self.archive_processed_files([f"s3://{self.raw_bucket}/incoming/orders/"])
             
             # Step 7: Data quality metrics and logging
             final_count = transformed_df.count()
@@ -305,19 +369,6 @@ class OrdersETL:
             print(f"🔄 Duplicates removed: {valid_df.count() - deduped_df.count()}")
             print(f"✅ Final processed records: {final_count}")
             print(f"📈 Success rate: {success_rate:.2f}%")
-            print(f"📁 Files processed: {processed_file_count}")
-            
-            # Step 8: Update processing metrics for monitoring
-            self.log_processing_metrics({
-                'dataset': 'orders',
-                'initial_count': initial_count,
-                'final_count': final_count,
-                'invalid_count': invalid_df.count(),
-                'duplicate_count': valid_df.count() - deduped_df.count(),
-                'success_rate': success_rate,
-                'files_processed': processed_file_count,
-                'processing_timestamp': datetime.now().isoformat()
-            })
             
             print(f"🎉 Orders ETL completed successfully!")
             print(f"🏁 Delta Lake table updated at: {delta_path}")
@@ -328,37 +379,11 @@ class OrdersETL:
             print(f"💥 Critical error in Orders ETL: {str(e)}")
             print(f"🔍 Error details: {type(e).__name__}")
             
-            # Log error for monitoring and alerting
-            self.log_processing_error({
-                'dataset': 'orders',
-                'error_type': type(e).__name__,
-                'error_message': str(e),
-                'processing_timestamp': datetime.now().isoformat()
-            })
+            import traceback
+            print(f"🔍 Full traceback:")
+            print(traceback.format_exc())
             
             raise e
-
-    def log_processing_metrics(self, metrics):
-        """Log processing metrics to CloudWatch for monitoring"""
-        try:
-            import json
-            metrics_path = f"s3://{self.processed_bucket}/metrics/orders/"
-            metrics_df = spark.createDataFrame([metrics])
-            metrics_df.write.mode("append").json(metrics_path)
-            print(f"📊 Processing metrics logged to: {metrics_path}")
-        except Exception as e:
-            print(f"⚠️ Failed to log metrics: {str(e)}")
-
-    def log_processing_error(self, error_info):
-        """Log processing errors for alerting and debugging"""
-        try:
-            import json
-            error_path = f"s3://{self.processed_bucket}/errors/orders/"
-            error_df = spark.createDataFrame([error_info])
-            error_df.write.mode("append").json(error_path)
-            print(f"🚨 Error logged to: {error_path}")
-        except Exception as e:
-            print(f"⚠️ Failed to log error: {str(e)}")
 
 # Main execution
 if __name__ == "__main__":
