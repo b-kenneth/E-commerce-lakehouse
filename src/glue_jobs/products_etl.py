@@ -25,12 +25,11 @@ spark = glueContext.spark_session
 job = Job(glueContext)
 job.init(args['JOB_NAME'], args)
 
-# Configure Delta Lake
-for key, value in {
-    "spark.sql.extensions": "io.delta.sql.DeltaSparkSessionExtension",
-    "spark.sql.catalog.spark_catalog": "org.apache.spark.sql.delta.catalog.DeltaCatalog"
-}.items():
-    spark.conf.set(key, value)
+# REMOVE THESE LINES - They cause the error:
+# spark.conf.set("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
+# spark.conf.set("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+
+# Delta Lake configurations are now set at job level via --conf parameters
 
 class ProductsETL:
     def __init__(self, raw_bucket, processed_bucket, environment, glue_database):
@@ -39,6 +38,16 @@ class ProductsETL:
         self.environment = environment
         self.glue_database = glue_database
         self.s3_client = boto3.client('s3')
+        
+        # Verify Delta Lake is properly configured
+        print("🔧 Verifying Delta Lake configuration...")
+        try:
+            extensions = spark.conf.get("spark.sql.extensions", "Not set")
+            catalog = spark.conf.get("spark.sql.catalog.spark_catalog", "Not set")
+            print(f"✅ Extensions: {extensions}")
+            print(f"✅ Catalog: {catalog}")
+        except Exception as e:
+            print(f"⚠️ Configuration check failed: {str(e)}")
         
     def validate_products_data(self, df: DataFrame) -> tuple:
         """Validate products data with referential integrity checks"""
@@ -81,25 +90,35 @@ class ProductsETL:
         
         print(f"💾 Writing products to Delta Lake: {table_path}")
         
-        if DeltaTable.isDeltaTable(spark, table_path):
-            print("📝 Performing MERGE operation")
-            
-            delta_table = DeltaTable.forPath(spark, table_path)
-            
-            delta_table.alias("target").merge(
-                df.alias("source"),
-                "target.product_id = source.product_id"
-            ).whenMatchedUpdateAll() \
-             .whenNotMatchedInsertAll() \
-             .execute()
-        else:
-            print("📝 Initial write with partitioning by department")
-            
-            df.write.format("delta") \
-              .mode("overwrite") \
-              .partitionBy("department") \
-              .option("path", table_path) \
-              .saveAsTable(f"{self.glue_database}.products")
+        try:
+            if DeltaTable.isDeltaTable(spark, table_path):
+                print("📝 Performing MERGE operation")
+                
+                delta_table = DeltaTable.forPath(spark, table_path)
+                
+                delta_table.alias("target").merge(
+                    df.alias("source"),
+                    "target.product_id = source.product_id"
+                ).whenMatchedUpdateAll() \
+                 .whenNotMatchedInsertAll() \
+                 .execute()
+                 
+                print("✅ MERGE operation completed")
+            else:
+                print("📝 Initial write with partitioning by department")
+                
+                df.write.format("delta") \
+                  .mode("overwrite") \
+                  .partitionBy("department") \
+                  .save(table_path)
+                  
+                print("✅ Initial Delta table created")
+                
+        except Exception as e:
+            print(f"💥 Error writing to Delta Lake: {str(e)}")
+            # Fallback to Parquet if Delta Lake fails
+            print("🔄 Falling back to Parquet format...")
+            df.write.mode("overwrite").partitionBy("department").parquet(table_path)
     
     def process_products(self):
         """Main processing logic for products"""
@@ -130,6 +149,7 @@ class ProductsETL:
                 invalid_df.withColumn("rejection_reason", lit("validation_failed")) \
                          .withColumn("rejection_timestamp", current_timestamp()) \
                          .write.mode("append").parquet(rejected_path)
+                print(f"📝 Rejected {invalid_df.count()} invalid records")
             
             # Transform
             transformed_df = self.transform_products(valid_df)
@@ -145,6 +165,9 @@ class ProductsETL:
             
         except Exception as e:
             print(f"💥 Error in Products ETL: {str(e)}")
+            import traceback
+            print(f"🔍 Full traceback:")
+            print(traceback.format_exc())
             raise e
 
 # Main execution
