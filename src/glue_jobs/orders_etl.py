@@ -301,30 +301,22 @@ class OrdersETL:
     def process_orders(self):
         """Enhanced processing logic that handles both incoming and processing folders"""
         
-        print("🚀 Starting Enhanced Orders ETL Process")
-        print(f"📍 Environment: {self.environment}")
-        print(f"📍 Raw Bucket: {self.raw_bucket}")
-        print(f"📍 Processed Bucket: {self.processed_bucket}")
-        
+        print("🚀 Starting Orders ETL Process")
+    
         try:
-            # Check both incoming and processing folders for multi-format support
-            input_paths = [
-                f"s3://{self.raw_bucket}/incoming/orders/",
-                f"s3://{self.raw_bucket}/processing/orders/"
-            ]
+            # Only read from processing folder (files are already converted to CSV)
+            input_path = f"s3://{self.raw_bucket}/processing/orders/"
+            print(f"📖 Reading converted CSV files from: {input_path}")
             
-            # Read multi-format data
-            raw_df = self.read_multi_format_data(input_paths)
-            
-            if raw_df is None:
-                print("⚠️ No data found to process in any location")
-                return 0
+            raw_df = spark.read.option("header", "true") \
+                            .option("inferSchema", "true") \
+                            .csv(input_path)
             
             initial_count = raw_df.count()
             print(f"📊 Total records to process: {initial_count}")
             
             if initial_count == 0:
-                print("⚠️ No valid data found after reading files")
+                print("⚠️ No data found to process")
                 return 0
             
             # Step 1: Enhanced data validation with detailed logging
