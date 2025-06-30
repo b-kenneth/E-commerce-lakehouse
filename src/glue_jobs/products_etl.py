@@ -25,11 +25,6 @@ spark = glueContext.spark_session
 job = Job(glueContext)
 job.init(args['JOB_NAME'], args)
 
-# REMOVE THESE LINES - They cause the error:
-# spark.conf.set("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-# spark.conf.set("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-
-# Delta Lake configurations are now set at job level via --conf parameters
 
 class ProductsETL:
     def __init__(self, raw_bucket, processed_bucket, environment, glue_database):

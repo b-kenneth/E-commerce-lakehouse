@@ -1,4 +1,3 @@
-# src/glue_jobs/orders_etl.py
 import sys
 from awsglue.transforms import *
 from awsglue.utils import getResolvedOptions
@@ -28,13 +27,6 @@ spark = glueContext.spark_session
 job = Job(glueContext)
 job.init(args['JOB_NAME'], args)
 
-# Configure Delta Lake
-for key, value in {
-    "spark.sql.extensions": "io.delta.sql.DeltaSparkSessionExtension",
-    "spark.sql.catalog.spark_catalog": "org.apache.spark.sql.delta.catalog.DeltaCatalog",
-    "spark.databricks.delta.retentionDurationCheck.enabled": "false"
-}.items():
-    spark.conf.set(key, value)
 
 class OrdersETL:
     def __init__(self, raw_bucket, processed_bucket, environment, glue_database):
@@ -43,6 +35,16 @@ class OrdersETL:
         self.environment = environment
         self.glue_database = glue_database
         self.s3_client = boto3.client('s3')
+        
+        # Verify Delta Lake is properly configured
+        print("🔧 Verifying Delta Lake configuration...")
+        try:
+            extensions = spark.conf.get("spark.sql.extensions", "Not set")
+            catalog = spark.conf.get("spark.sql.catalog.spark_catalog", "Not set")
+            print(f"✅ Extensions: {extensions}")
+            print(f"✅ Catalog: {catalog}")
+        except Exception as e:
+            print(f"⚠️ Configuration check failed: {str(e)}")
         
     def validate_orders_data(self, df: DataFrame) -> tuple:
         """Validate orders data according to project requirements"""
