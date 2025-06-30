@@ -12,20 +12,23 @@ from pyspark.sql.window import Window
 import boto3
 from datetime import datetime
 
-# Get job arguments
-args = getResolvedOptions(sys.argv, [
-    'JOB_NAME', 
-    'RAW_BUCKET', 
-    'PROCESSED_BUCKET',
-    'ENVIRONMENT',
-    'GLUE_DATABASE'
-])
+args = getResolvedOptions(sys.argv, ['JOB_NAME', 'RAW_BUCKET', 'PROCESSED_BUCKET', 'ENVIRONMENT', 'GLUE_DATABASE'])
 
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
 job = Job(glueContext)
 job.init(args['JOB_NAME'], args)
+
+input_path = f"s3://{args['RAW_BUCKET']}/processing/orders/*.csv"  # Only CSV files
+
+print(f"Reading orders data from: {input_path}")
+
+orders_df = spark.read.option("header", "true").csv(input_path)
+
+print("Schema of orders dataframe:")
+orders_df.printSchema()
+
 
 
 class OrdersETL:
