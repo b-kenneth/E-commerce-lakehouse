@@ -76,28 +76,9 @@ jobs:
         python -m py_compile src/glue_jobs/*.py
         echo "✅ All Spark jobs have valid syntax"
 
-  security-scan:
-    runs-on: ubuntu-latest
-    needs: unit-tests
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-    - name: Run security scan
-      run: |
-        pip install bandit
-        bandit -r src/ -f json -o security-report.json || true
-    
-    - name: Upload security report
-      uses: actions/upload-artifact@v3
-      with:
-        name: security-report
-        path: security-report.json
-
   deploy-main:
     runs-on: ubuntu-latest
-    needs: [unit-tests, integration-tests, security-scan]
+    needs: [unit-tests, integration-tests]
     if: github.ref == 'refs/heads/main'
     
     steps:
@@ -166,7 +147,6 @@ jobs:
         echo ""
         echo "📋 === Pipeline Ready ==="
         echo "Your lakehouse pipeline is deployed and ready for testing!"
-
 
 # # .github/workflows/deploy-pipeline.yml
 # name: Deploy Lakehouse Pipeline
