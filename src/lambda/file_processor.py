@@ -13,19 +13,56 @@ def lambda_handler(event, context):
     
     s3_client = boto3.client('s3')
     
-    # Handle both S3 event and Step Functions input
-    if 'Records' in event:
-        # S3 Event structure
-        bucket = event['Records'][0]['s3']['bucket']['name']
-        key = urllib.parse.unquote_plus(event['Records'][0]['s3']['object']['key'], encoding='utf-8')
-    else:
-        # Step Functions structure
-        bucket = event['bucket']
-        key = event['key']
-    
-    print(f"🔍 Processing file: s3://{bucket}/{key}")
+    print(f"🔍 Received event: {json.dumps(event, indent=2)}")
     
     try:
+        # Extract bucket and key safely from different event structures
+        bucket = None
+        key = None
+        
+        # Method 1: Direct access (from Step Functions)
+        if 'bucket' in event and 'key' in event:
+            bucket = event['bucket']
+            key = event['key']
+            print("✅ Found bucket and key at top level")
+        
+        # Method 2: From nested lambda_result.Payload (if event is nested)
+        elif 'lambda_result' in event and 'Payload' in event['lambda_result']:
+            if isinstance(event['lambda_result']['Payload'], str):
+                payload = json.loads(event['lambda_result']['Payload'])
+            else:
+                payload = event['lambda_result']['Payload']
+            bucket = payload.get('bucket')
+            key = payload.get('key')
+            print("✅ Found bucket and key in lambda_result.Payload")
+        
+        # Method 3: From S3 Records (if triggered by S3 event)
+        elif 'Records' in event and len(event['Records']) > 0:
+            record = event['Records'][0]
+            bucket = record['s3']['bucket']['name']
+            key = urllib.parse.unquote_plus(record['s3']['object']['key'], encoding='utf-8')
+            print("✅ Found bucket and key in S3 Records")
+        
+        # Method 4: Check if the entire event is the payload
+        elif 'original_key' in event:
+            bucket = event.get('bucket')
+            key = event.get('original_key') or event.get('key')
+            print("✅ Found bucket and key with original_key")
+        
+        if not bucket or not key:
+            error_msg = f"Could not extract bucket and key from event. Available keys: {list(event.keys())}"
+            print(f"❌ {error_msg}")
+            return {
+                'statusCode': 400,
+                'body': json.dumps({
+                    'status': 'validation_failed',
+                    'errors': [error_msg],
+                    'event_keys': list(event.keys())
+                })
+            }
+        
+        print(f"🔍 Processing file: s3://{bucket}/{key}")
+        
         # Step 1: Determine file format and dataset type
         file_format = detect_file_format(key)
         dataset_type = determine_dataset_type(key)
@@ -39,6 +76,8 @@ def lambda_handler(event, context):
                     'file': key
                 })
             }
+        
+        print(f"📊 Detected dataset type: {dataset_type}, format: {file_format}")
         
         # Step 2: Process and convert files to processing folder
         if file_format == 'excel':
@@ -88,7 +127,7 @@ def lambda_handler(event, context):
             'body': json.dumps({
                 'status': 'processing_failed',
                 'error': str(e),
-                'file': key
+                'event_keys': list(event.keys()) if isinstance(event, dict) else 'event_not_dict'
             })
         }
 
