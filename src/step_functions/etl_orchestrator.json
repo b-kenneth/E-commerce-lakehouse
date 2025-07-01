@@ -7,10 +7,13 @@
       "Type": "Pass",
       "Parameters": {
         "bucket.$": "$.bucket",
-        "key.$": "$.key",
+        "original_key.$": "$.original_key",
+        "converted_files.$": "$.converted_files",
         "timestamp.$": "$.timestamp",
-        "execution_id.$": "$$.Execution.Name",
-        "original_input.$": "$"
+        "event_name.$": "$.event_name",
+        "dataset_type.$": "$.dataset_type",
+        "execution_trigger.$": "$.execution_trigger",
+        "execution_id.$": "$$.Execution.Name"
       },
       "Next": "FileFormatDetectionAndValidation"
     },
@@ -68,8 +71,9 @@
         "processing_info.$": "States.StringToJson($.lambda_result.Payload.body)",
         "execution_id.$": "$.execution_id",
         "bucket.$": "$.bucket",
-        "key.$": "$.key",
-        "timestamp.$": "$.timestamp"
+        "original_key.$": "$.original_key",
+        "timestamp.$": "$.timestamp",
+        "dataset_type.$": "$.dataset_type"
       },
       "Next": "DetermineETLStrategy"
     },
