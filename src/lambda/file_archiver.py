@@ -1,7 +1,12 @@
 # src/lambda/file_archiver.py
 import boto3
 import json
+import logging
 from datetime import datetime
+
+# Configure logging
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 
 def lambda_handler(event, context):
     """
@@ -52,10 +57,10 @@ def lambda_handler(event, context):
                                 'archived': archive_key
                             })
                             
-                            print(f"✅ Archived: {obj['Key']} -> {archive_key}")
+                            logger.info(f"Archived: {obj['Key']} -> {archive_key}")
                             
             except Exception as e:
-                print(f"⚠️ Error archiving folder {folder}: {str(e)}")
+                logger.warning(f"Error archiving folder {folder}: {str(e)}")
                 continue
         
         return {
@@ -67,7 +72,7 @@ def lambda_handler(event, context):
         }
         
     except Exception as e:
-        print(f"💥 Error in file archiver: {str(e)}")
+        logger.error(f"Error in file archiver: {str(e)}", exc_info=True)
         return {
             'statusCode': 500,
             'body': json.dumps({

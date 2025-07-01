@@ -433,7 +433,7 @@
       "Type": "Pass",
       "Parameters": {
         "status": "CRAWLER_FAILED",
-        "message": "⚠️ Glue Crawler failed or reached unknown state",
+        "message": "Glue Crawler failed or reached unknown state",
         "crawler_state.$": "$.Crawler.State",
         "crawler_name": "lakehouse-catalog-crawler",
         "timestamp.$": "$$.State.EnteredTime"
@@ -495,7 +495,7 @@
       "Type": "Pass",
       "Parameters": {
         "status": "SUCCESS",
-        "message": "✅ Lakehouse ETL pipeline completed successfully with multi-format support",
+        "message": "Lakehouse ETL pipeline completed successfully with multi-format support",
         "timestamp.$": "$$.State.EnteredTime",
         "execution_name.$": "$$.Execution.Name"
       },
@@ -505,7 +505,7 @@
       "Type": "Pass",
       "Parameters": {
         "status": "VALIDATION_FAILED",
-        "message": "❌ File validation failed - check file format and schema",
+        "message": "File validation failed - check file format and schema",
         "error.$": "$.error",
         "timestamp.$": "$$.State.EnteredTime"
       },
@@ -515,7 +515,7 @@
       "Type": "Pass",
       "Parameters": {
         "status": "ETL_FAILED",
-        "message": "💥 Lakehouse ETL pipeline failed during processing",
+        "message": "Lakehouse ETL pipeline failed during processing",
         "error.$": "$.error",
         "timestamp.$": "$$.State.EnteredTime"
       },
@@ -525,7 +525,7 @@
       "Type": "Pass",
       "Parameters": {
         "status": "CRAWLER_FAILED",
-        "message": "⚠️ Glue Crawler failed to start or encountered an error",
+        "message": "Glue Crawler failed to start or encountered an error",
         "error.$": "$.error",
         "timestamp.$": "$$.State.EnteredTime"
       },

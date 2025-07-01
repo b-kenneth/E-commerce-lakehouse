@@ -1,4 +1,5 @@
 import sys
+import logging
 from awsglue.transforms import *
 from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
@@ -9,6 +10,10 @@ from pyspark.sql import DataFrame
 from pyspark.sql.functions import *
 from pyspark.sql.types import *
 import boto3
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 args = getResolvedOptions(sys.argv, [
     'JOB_NAME', 
@@ -35,7 +40,6 @@ class OrderItemsETL:
         
     def validate_order_items_data(self, df: DataFrame) -> tuple:
         """Validate order items data"""
-        
         valid_df = df.filter(
             (col("id").isNotNull()) &
             (col("order_id").isNotNull()) &
@@ -43,11 +47,9 @@ class OrderItemsETL:
             (col("product_id").isNotNull()) &
             (col("add_to_cart_order").isNotNull()) &
             (col("reordered").isin([0, 1])) &
-            # Ensure positive IDs
             (col("id") > 0) &
             (col("order_id") > 0) &
             (col("product_id") > 0) &
-            # Reasonable cart order (1-50)
             (col("add_to_cart_order").between(1, 50))
         )
         
@@ -69,10 +71,8 @@ class OrderItemsETL:
     
     def write_to_delta(self, df: DataFrame, table_path: str):
         """Write DataFrame to Delta Lake with merge logic"""
-        
         if DeltaTable.isDeltaTable(spark, table_path):
             delta_table = DeltaTable.forPath(spark, table_path)
-            
             delta_table.alias("target").merge(
                 df.alias("source"),
                 "target.id = source.id"
@@ -87,36 +87,30 @@ class OrderItemsETL:
     
     def process_order_items(self, file_path: str):
         """Main processing logic for order items"""
-        
         raw_df = spark.read.option("header", "true") \
                           .option("inferSchema", "true") \
                           .csv(file_path)
         
-        print(f"Processing {raw_df.count()} raw order items records")
+        logger.info(f"Processing {raw_df.count()} raw order items records")
         
-        # Validate data
         valid_df, invalid_df = self.validate_order_items_data(raw_df)
         
         if invalid_df.count() > 0:
-            print(f"Found {invalid_df.count()} invalid records")
-            # Log rejected records
+            logger.warning(f"Found {invalid_df.count()} invalid records")
             rejected_path = f"s3://{self.processed_bucket}/rejected/order_items/"
             invalid_df.withColumn("rejection_reason", lit("validation_failed")) \
                      .withColumn("rejection_timestamp", current_timestamp()) \
                      .write.mode("append").parquet(rejected_path)
         
-        # Deduplicate
         deduped_df = self.deduplicate_order_items(valid_df)
-        print(f"After deduplication: {deduped_df.count()} records")
+        logger.info(f"After deduplication: {deduped_df.count()} records")
         
-        # Transform
         transformed_df = self.transform_order_items(deduped_df)
         
-        # Write to Delta Lake
         delta_path = f"s3://{self.processed_bucket}/lakehouse-dwh/order_items/"
         self.write_to_delta(transformed_df, delta_path)
         
-        print(f"Successfully processed order items to {delta_path}")
+        logger.info(f"Successfully processed order items to {delta_path}")
         return transformed_df.count()
 
 # Main execution
@@ -130,6 +124,6 @@ if __name__ == "__main__":
     input_path = f"s3://{args['RAW_BUCKET']}/order_items/*.csv"
     processed_count = etl.process_order_items(input_path)
     
-    print(f"Order Items ETL job completed. Processed {processed_count} records.")
+    logger.info(f"Order Items ETL job completed. Processed {processed_count} records.")
 
 job.commit()
