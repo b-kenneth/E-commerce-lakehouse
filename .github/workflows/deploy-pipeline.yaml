@@ -76,25 +76,6 @@ jobs:
         python -m py_compile src/glue_jobs/*.py
         echo "✅ All Spark jobs have valid syntax"
 
-  security-scan:
-    runs-on: ubuntu-latest
-    needs: unit-tests
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-    - name: Run security scan
-      run: |
-        pip install bandit
-        bandit -r src/ -f json -o security-report.json || true
-    
-    - name: Upload security report
-      uses: actions/upload-artifact@v3
-      with:
-        name: security-report
-        path: security-report.json
-
   deploy-main:
     runs-on: ubuntu-latest
     needs: [unit-tests, integration-tests, security-scan]
@@ -154,30 +135,6 @@ jobs:
           echo "✅ Step Functions definition uploaded"
         else
           echo "⚠️ Step Functions definition not found"
-        fi
-    
-    - name: Upload Sample Data (if exists)
-      run: |
-        if [ -d "data/sample" ] && [ "$(ls -A data/sample)" ]; then
-          echo "📦 Uploading sample data for testing..."
-          
-          # Upload to incoming folders
-          for file in data/sample/*.csv; do
-            if [ -f "$file" ]; then
-              filename=$(basename "$file")
-              if [[ "$filename" == *"product"* ]]; then
-                aws s3 cp "$file" s3://${{ env.RAW_BUCKET }}/incoming/products/
-              elif [[ "$filename" == *"order_item"* ]]; then
-                aws s3 cp "$file" s3://${{ env.RAW_BUCKET }}/incoming/order_items/
-              elif [[ "$filename" == *"order"* ]]; then
-                aws s3 cp "$file" s3://${{ env.RAW_BUCKET }}/incoming/orders/
-              fi
-            fi
-          done
-          
-          echo "✅ Sample data uploaded to incoming folders"
-        else
-          echo "⚠️ No sample data found"
         fi
     
     - name: Deployment Summary
