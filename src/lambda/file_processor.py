@@ -8,7 +8,7 @@ import urllib.parse
 def lambda_handler(event, context):
     """
     Multi-format file processor and validator
-    Handles CSV and Excel files with pre-processing validation
+    Validates all CSV files in a dataset folder after conversion
     """
     
     s3_client = boto3.client('s3')
@@ -26,11 +26,30 @@ def lambda_handler(event, context):
     print(f"🔍 Processing file: s3://{bucket}/{key}")
     
     try:
-        # Step 1: Determine file format
+        # Step 1: Determine file format and dataset type
         file_format = detect_file_format(key)
+        dataset_type = determine_dataset_type(key)
         
-        # Step 2: Validate file structure
-        validation_result = validate_file_structure(bucket, key, file_format)
+        if not dataset_type:
+            return {
+                'statusCode': 400,
+                'body': json.dumps({
+                    'status': 'validation_failed',
+                    'errors': ['Cannot determine dataset type from file path'],
+                    'file': key
+                })
+            }
+        
+        # Step 2: Process and convert files to processing folder
+        if file_format == 'excel':
+            processed_files = copy_to_processing(s3_client, bucket, key)
+            print("⚠️ Excel file copied to processing - validation will occur after conversion")
+        else:
+            processed_files = copy_to_processing(s3_client, bucket, key)
+        
+        # Step 3: Validate all CSV files in the dataset folder
+        processing_prefix = f"processing/{dataset_type}/"
+        validation_result = validate_dataset_files(s3_client, bucket, processing_prefix, dataset_type)
         
         if not validation_result['is_valid']:
             print(f"❌ Validation failed: {validation_result['errors']}")
@@ -39,29 +58,24 @@ def lambda_handler(event, context):
                 'body': json.dumps({
                     'status': 'validation_failed',
                     'errors': validation_result['errors'],
+                    'files_validated': validation_result.get('files_validated', []),
                     'file': key
                 })
             }
         
-        # Step 3: Process based on format
-        if file_format == 'excel':
-            # For Excel files, just copy to processing folder
-            # Glue will handle Excel processing with proper libraries
-            processed_files = copy_to_processing(bucket, key)
-            print("⚠️ Excel file copied to processing - Glue will handle conversion")
-        else:
-            processed_files = process_csv_file(bucket, key)
-        
         # Step 4: Determine appropriate Glue jobs
-        glue_jobs = determine_glue_jobs(key)
+        glue_jobs = determine_glue_jobs(dataset_type)
+        
+        print(f"✅ Validation passed for {len(validation_result['files_validated'])} files")
         
         return {
             'statusCode': 200,
             'body': json.dumps({
                 'status': 'ready_for_processing',
-                'processed_files': processed_files,
+                'processed_files': validation_result['files_validated'],
                 'glue_jobs': glue_jobs,
-                'validation_passed': True
+                'validation_passed': True,
+                'dataset_type': dataset_type
             })
         }
         
@@ -87,77 +101,22 @@ def detect_file_format(file_key):
     else:
         raise ValueError(f"Unsupported file format: {file_key}")
 
-def validate_file_structure(bucket, key, file_format):
-    """Validate file structure using native Python"""
-    
-    s3_client = boto3.client('s3')
-    validation_result = {'is_valid': True, 'errors': []}
-    
-    try:
-        # Define expected schemas
-        expected_schemas = {
-            'orders': ['order_num', 'order_id', 'user_id', 'order_timestamp', 'total_amount', 'date'],
-            'products': ['product_id', 'department_id', 'department', 'product_name'],
-            'order_items': ['id', 'order_id', 'user_id', 'days_since_prior_order', 'product_id', 'add_to_cart_order', 'reordered', 'order_timestamp', 'date']
-        }
-        
-        # Determine dataset type from file path
-        dataset_type = None
-        for ds_type in expected_schemas.keys():
-            if ds_type in key.lower():
-                dataset_type = ds_type
-                break
-        
-        if not dataset_type:
-            validation_result['errors'].append("Cannot determine dataset type from file path")
-            validation_result['is_valid'] = False
-            return validation_result
-        
-        # For CSV files, validate headers
-        if file_format == 'csv':
-            headers = get_csv_headers_native(bucket, key)
-            expected_headers = expected_schemas[dataset_type]
-            missing_headers = set(expected_headers) - set(headers)
-            
-            if missing_headers:
-                validation_result['errors'].append(f"Missing required headers: {list(missing_headers)}")
-                validation_result['is_valid'] = False
+def determine_dataset_type(key):
+    """Determine dataset type from file path"""
+    key_lower = key.lower()
+    if 'product' in key_lower:
+        return 'products'
+    elif 'order' in key_lower:
+        if 'item' in key_lower:
+            return 'order_items'
         else:
-            # For Excel files, defer validation to Glue
-            print("⚠️ Excel validation deferred to Glue processing")
-        
-        print(f"✅ Header validation completed for {dataset_type}")
-        
-    except Exception as e:
-        validation_result['errors'].append(f"Validation error: {str(e)}")
-        validation_result['is_valid'] = False
-    
-    return validation_result
+            return 'orders'
+    return None
 
-def get_csv_headers_native(bucket, key):
-    """Extract headers from CSV file using native Python"""
-    try:
-        s3_client = boto3.client('s3')
-        
-        # Read first few bytes to get headers
-        response = s3_client.get_object(Bucket=bucket, Key=key, Range='bytes=0-1024')
-        content = response['Body'].read().decode('utf-8')
-        
-        # Parse CSV headers
-        csv_reader = csv.reader(StringIO(content))
-        headers = next(csv_reader)
-        
-        return [header.strip() for header in headers]
-        
-    except Exception as e:
-        print(f"Error reading CSV headers: {str(e)}")
-        return []
-
-def copy_to_processing(bucket, key):
+def copy_to_processing(s3_client, bucket, key):
     """Copy file to processing folder"""
-    s3_client = boto3.client('s3')
-    
-    processing_key = key.replace('incoming/', 'processing/')
+    dataset_type = determine_dataset_type(key)
+    processing_key = f"processing/{dataset_type}/{key.split('/')[-1]}"
     
     copy_source = {'Bucket': bucket, 'Key': key}
     s3_client.copy_object(
@@ -169,20 +128,105 @@ def copy_to_processing(bucket, key):
     print(f"✅ Copied {key} to {processing_key}")
     return [processing_key]
 
-def process_csv_file(bucket, key):
-    """Process CSV file (copy to processing folder)"""
-    
-    print(f"📄 Processing CSV file: {key}")
-    return copy_to_processing(bucket, key)
-
-def determine_glue_jobs(file_key):
-    """Determine which Glue jobs to trigger based on file path"""
-    
-    if 'orders' in file_key.lower() and 'order_items' not in file_key.lower():
-        return ['lakehouse-orders-etl']
-    elif 'products' in file_key.lower():
-        return ['lakehouse-products-etl']
-    elif 'order_items' in file_key.lower():
-        return ['lakehouse-order-items-etl']
-    else:
+def list_csv_files(s3_client, bucket, prefix):
+    """List all CSV files under a given S3 prefix"""
+    try:
+        paginator = s3_client.get_paginator('list_objects_v2')
+        page_iterator = paginator.paginate(Bucket=bucket, Prefix=prefix)
+        files = []
+        
+        for page in page_iterator:
+            if 'Contents' in page:
+                for obj in page['Contents']:
+                    key = obj['Key']
+                    if key.lower().endswith('.csv') and not key.endswith('/'):
+                        files.append(key)
+        
+        print(f"📁 Found {len(files)} CSV files in {prefix}")
+        return files
+        
+    except Exception as e:
+        print(f"Error listing files in {prefix}: {str(e)}")
         return []
+
+def get_csv_headers(s3_client, bucket, key):
+    """Get headers of a CSV file from S3"""
+    try:
+        response = s3_client.get_object(Bucket=bucket, Key=key, Range='bytes=0-1024')
+        content = response['Body'].read().decode('utf-8')
+        csv_reader = csv.reader(StringIO(content))
+        headers = next(csv_reader)
+        return [h.strip() for h in headers]
+    except Exception as e:
+        print(f"Error reading headers from {key}: {str(e)}")
+        return []
+
+def validate_dataset_files(s3_client, bucket, prefix, dataset_type):
+    """Validate all CSV files under prefix against expected schema"""
+    
+    # Expected schemas for each dataset
+    expected_schemas = {
+        'orders': ['order_num', 'order_id', 'user_id', 'order_timestamp', 'total_amount', 'date'],
+        'products': ['product_id', 'department_id', 'department', 'product_name'],
+        'order_items': ['id', 'order_id', 'user_id', 'days_since_prior_order', 'product_id', 'add_to_cart_order', 'reordered', 'order_timestamp', 'date']
+    }
+    
+    print(f"🔍 Validating {dataset_type} files in {prefix}")
+    
+    files = list_csv_files(s3_client, bucket, prefix)
+    if not files:
+        return {
+            'is_valid': False, 
+            'errors': [f'No CSV files found under {prefix}'],
+            'files_validated': []
+        }
+
+    expected_headers = expected_schemas.get(dataset_type, [])
+    if not expected_headers:
+        return {
+            'is_valid': False,
+            'errors': [f'Unknown dataset type: {dataset_type}'],
+            'files_validated': files
+        }
+    
+    errors = []
+    valid_files = []
+    
+    for file_key in files:
+        print(f"📄 Validating file: {file_key}")
+        headers = get_csv_headers(s3_client, bucket, file_key)
+        
+        if not headers:
+            errors.append(f'File {file_key}: Could not read headers')
+            continue
+        
+        # Check for missing required headers
+        missing = set(expected_headers) - set(headers)
+        if missing:
+            errors.append(f'File {file_key} missing headers: {list(missing)}')
+        else:
+            valid_files.append(file_key)
+            print(f"✅ File {file_key} validation passed")
+    
+    is_valid = len(errors) == 0 and len(valid_files) > 0
+    
+    print(f"📊 Validation summary: {len(valid_files)} valid files, {len(errors)} errors")
+    
+    return {
+        'is_valid': is_valid, 
+        'errors': errors, 
+        'files_validated': valid_files,
+        'expected_headers': expected_headers,
+        'total_files_checked': len(files)
+    }
+
+def determine_glue_jobs(dataset_type):
+    """Determine which Glue jobs to trigger based on dataset type"""
+    
+    job_mapping = {
+        'orders': ['lakehouse-orders-etl'],
+        'products': ['lakehouse-products-etl'],
+        'order_items': ['lakehouse-order-items-etl']
+    }
+    
+    return job_mapping.get(dataset_type, [])
